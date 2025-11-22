@@ -107,6 +107,7 @@ SearchEngine::EvalResult SearchEngine::evaluatePlayer(const Board &board, Player
     int score = 0;
     int longestRun = 0;
     int longestOpen = 0;
+    bool hasOpenFourDouble = false;
     // --- Rows ---
     // Scan each row.  When we encounter a run of 1s, we measure its length
     // and check whether the ends are open (i.e. adjacent cells are empty).
@@ -121,11 +122,15 @@ SearchEngine::EvalResult SearchEngine::evaluatePlayer(const Board &board, Player
                 int count = x - x1;
                 bool leftOpen = (x1 - 1 >= 0 && grid[y][x1 - 1] == 0);
                 bool rightOpen = (x < 12 && grid[y][x] == 0);
-                score += patternScore(count, leftOpen, rightOpen);
+                int pscore = patternScore(count, leftOpen, rightOpen);
+                score += pscore;
                 int openEnds = (leftOpen ? 1 : 0) + (rightOpen ? 1 : 0);
                 if (count > longestRun || (count == longestRun && openEnds > longestOpen)) {
                     longestRun = count;
                     longestOpen = openEnds;
+                }
+                if (count == 4 && leftOpen && rightOpen) {
+                    hasOpenFourDouble = true;
                 }
             } else {
                 ++x;
@@ -142,7 +147,16 @@ SearchEngine::EvalResult SearchEngine::evaluatePlayer(const Board &board, Player
                 int count = y - y1;
                 bool leftOpen = (y1 - 1 >= 0 && grid[y1 - 1][x] == 0);
                 bool rightOpen = (y < 12 && grid[y][x] == 0);
-                score += patternScore(count, leftOpen, rightOpen);
+                int pscore = patternScore(count, leftOpen, rightOpen);
+                score += pscore;
+                int openEnds = (leftOpen ? 1 : 0) + (rightOpen ? 1 : 0);
+                if (count > longestRun || (count == longestRun && openEnds > longestOpen)) {
+                    longestRun = count;
+                    longestOpen = openEnds;
+                }
+                if (count == 4 && leftOpen && rightOpen) {
+                    hasOpenFourDouble = true;
+                }
             } else {
                 ++y;
             }
@@ -179,11 +193,15 @@ SearchEngine::EvalResult SearchEngine::evaluatePlayer(const Board &board, Player
                     int yr = yStart + j;
                     if (grid[yr][xr] == 0) rightOpen = true;
                 }
-                score += patternScore(count, leftOpen, rightOpen);
+                int pscore = patternScore(count, leftOpen, rightOpen);
+                score += pscore;
                 int openEnds = (leftOpen ? 1 : 0) + (rightOpen ? 1 : 0);
                 if (count > longestRun || (count == longestRun && openEnds > longestOpen)) {
                     longestRun = count;
                     longestOpen = openEnds;
+                }
+                if (count == 4 && leftOpen && rightOpen) {
+                    hasOpenFourDouble = true;
                 }
                 i = j;
             } else {
@@ -222,11 +240,15 @@ SearchEngine::EvalResult SearchEngine::evaluatePlayer(const Board &board, Player
                     int yr = yStart - j;
                     if (grid[yr][xr] == 0) rightOpen = true;
                 }
-                score += patternScore(count, leftOpen, rightOpen);
+                int pscore = patternScore(count, leftOpen, rightOpen);
+                score += pscore;
                 int openEnds = (leftOpen ? 1 : 0) + (rightOpen ? 1 : 0);
                 if (count > longestRun || (count == longestRun && openEnds > longestOpen)) {
                     longestRun = count;
                     longestOpen = openEnds;
+                }
+                if (count == 4 && leftOpen && rightOpen) {
+                    hasOpenFourDouble = true;
                 }
                 i = j;
             } else {
@@ -238,6 +260,7 @@ SearchEngine::EvalResult SearchEngine::evaluatePlayer(const Board &board, Player
     result.patternScore = score;
     result.longestRun = longestRun;
     result.longestOpenEnds = longestOpen;
+    result.hasOpenFourDouble = hasOpenFourDouble;
     return result;
 }
 
@@ -248,6 +271,14 @@ int SearchEngine::evaluate(const Board &board, Player myColor) const {
     Player opponent = (myColor == Player::Black ? Player::White : Player::Black);
     auto myEval = evaluatePlayer(board, myColor);
     auto oppEval = evaluatePlayer(board, opponent);
+
+    const int DOUBLE_OPEN_FOUR_SCORE = 90000000;
+    if (myEval.hasOpenFourDouble && !oppEval.hasOpenFourDouble) {
+        return DOUBLE_OPEN_FOUR_SCORE;
+    }
+    if (oppEval.hasOpenFourDouble && !myEval.hasOpenFourDouble) {
+        return -DOUBLE_OPEN_FOUR_SCORE;
+    }
 
     // Encourage goal-oriented play: heavily reward longer contiguous lines and
     // open-ended runs, which directly correlate with the ability to win or
@@ -265,6 +296,31 @@ int SearchEngine::evaluate(const Board &board, Player myColor) const {
     return positionalScore + shapeScore;
 }
 
+bool SearchEngine::isWinningMove(const Board &board, Player player, int x, int y) const {
+    if (board.isOccupied(x, y)) return false;
+    auto cellOf = [&](int cx, int cy) {
+        int state = board.getCellState(cx, cy);
+        if (state == 0) return 0;
+        return (state == 1 ? Player::Black : Player::White) == player ? 1 : -1;
+    };
+    const int dirs[4][2] = {{1,0},{0,1},{1,1},{1,-1}};
+    for (auto &d : dirs) {
+        int dx = d[0];
+        int dy = d[1];
+        int count = 1; // include hypothetical stone at (x,y)
+        int nx = x + dx, ny = y + dy;
+        while (nx >= 0 && nx < 12 && ny >= 0 && ny < 12 && cellOf(nx, ny) == 1) {
+            ++count; nx += dx; ny += dy;
+        }
+        nx = x - dx; ny = y - dy;
+        while (nx >= 0 && nx < 12 && ny >= 0 && ny < 12 && cellOf(nx, ny) == 1) {
+            ++count; nx -= dx; ny -= dy;
+        }
+        if (count >= 5) return true;
+    }
+    return false;
+}
+
 int SearchEngine::alphaBeta(Board &board, int depth, int alpha, int beta,
                   Player currentPlayer, Player myColor, int ply) {
     // This function implements a classic alpha–beta search with a
@@ -280,10 +336,6 @@ int SearchEngine::alphaBeta(Board &board, int depth, int alpha, int beta,
     if (timeUp()) {
         return 0;
     }
-    // Depth limit or terminal evaluation.
-    if (depth <= 0) {
-        return evaluate(board, myColor);
-    }
     // Check for immediate wins.  If myColor has five in a row, return a large
     // positive value.  If the opponent has five in a row, return a large
     // negative value.  We use a depth penalty to prefer shorter wins and
@@ -294,6 +346,10 @@ int SearchEngine::alphaBeta(Board &board, int depth, int alpha, int beta,
     Player opponent = (myColor == Player::Black ? Player::White : Player::Black);
     if (board.checkWin(opponent)) {
         return -100000000 + (maxDepthReached - depth);
+    }
+    // Depth limit or terminal evaluation.
+    if (depth <= 0) {
+        return evaluate(board, myColor);
     }
 
     // Look up this position in the transposition table.
@@ -438,6 +494,39 @@ Move SearchEngine::findBestMove(Board &board, Player myColor, int timeLimitMs) {
         return bookMove;
     }
 
+    // 1) Tactical override: if we can win immediately, do so without further search.
+    auto legalMoves = board.getLegalMoves();
+    for (const auto &m : legalMoves) {
+        if (isWinningMove(board, myColor, m.x, m.y)) {
+            return m;
+        }
+    }
+
+    // 2) Urgent defense: if the opponent has a winning move next turn, block it
+    // if possible. If multiple blocking squares exist, pick the one that keeps
+    // the best evaluation after our placement.
+    Player opponent = (myColor == Player::Black ? Player::White : Player::Black);
+    std::vector<Move> opponentWins;
+    for (const auto &m : legalMoves) {
+        if (isWinningMove(board, opponent, m.x, m.y)) {
+            opponentWins.push_back(m);
+        }
+    }
+    if (!opponentWins.empty()) {
+        Move bestBlock = opponentWins.front();
+        int bestScore = std::numeric_limits<int>::min();
+        for (const auto &block : opponentWins) {
+            board.makeMove(block.x, block.y);
+            int score = evaluate(board, myColor);
+            board.unmakeMove(block.x, block.y);
+            if (score > bestScore) {
+                bestScore = score;
+                bestBlock = block;
+            }
+        }
+        return bestBlock;
+    }
+
     // Urgent defensive move: if the opponent has an immediate tactical threat
     // (e.g., open four or a highly flexible three), answer it before starting
     // the full search to avoid time-consuming but obvious defenses.
@@ -540,7 +629,14 @@ std::vector<Move> SearchEngine::orderMoves(Board &board, Player currentPlayer, P
         // Check for immediate win for the player who plays this move.
         bool winForCurrent = board.checkWin(currentPlayer);
         // Check if this move would allow the opponent to win on their next turn.
-        bool winForOpp = board.checkWin(opponent);
+        bool winForOpp = false;
+        auto oppCandidates = board.getCandidateMoves();
+        for (const auto &oppMove : oppCandidates) {
+            if (isWinningMove(board, opponent, oppMove.x, oppMove.y)) {
+                winForOpp = true;
+                break;
+            }
+        }
         // Evaluate board from myColor perspective; larger is better for myColor.
         int evalScore = evaluate(board, myColor);
         board.unmakeMove(m.x, m.y);
