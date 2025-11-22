@@ -402,6 +402,17 @@ Move SearchEngine::findBestMove(Board &board, Player myColor, int timeLimitMs) {
     if (getOpeningMove(board, myColor, bookMove)) {
         return bookMove;
     }
+
+    // Urgent defensive move: if the opponent has an immediate tactical threat
+    // (e.g., open four or a highly flexible three), answer it before starting
+    // the full search to avoid time-consuming but obvious defenses.
+    auto defensiveMoves = threatSolver.findBlockingMoves(board, myColor);
+    if (!defensiveMoves.empty()) {
+        const int CRITICAL_SEVERITY = 500000; // open fours and simple fours.
+        if (defensiveMoves.front().severity >= CRITICAL_SEVERITY) {
+            return defensiveMoves.front().move;
+        }
+    }
     Move bestMove(-1, -1);
     // Generate and order root moves.  These moves will be re‑ordered
     // between iterations based on the values returned by the search.
@@ -475,6 +486,18 @@ std::vector<Move> SearchEngine::orderMoves(Board &board, Player currentPlayer, P
     std::vector<std::pair<int, Move>> scored;
     scored.reserve(moves.size());
     Player opponent = (currentPlayer == Player::Black ? Player::White : Player::Black);
+
+    // Surface urgent defensive moves against the opponent's most dangerous
+    // threats (e.g., open fours or open/broken threes) so they are explored
+    // early.
+    auto defensiveMoves = threatSolver.findBlockingMoves(board, currentPlayer);
+    std::unordered_map<int, int> defensiveLookup;
+    for (const auto &t : defensiveMoves) {
+        int key = t.move.y * 12 + t.move.x;
+        if (defensiveLookup.find(key) == defensiveLookup.end() || defensiveLookup[key] < t.severity) {
+            defensiveLookup[key] = t.severity;
+        }
+    }
     for (const auto &m : moves) {
         int score = 0;
         // Make the move and evaluate consequences.
@@ -502,6 +525,12 @@ std::vector<Move> SearchEngine::orderMoves(Board &board, Player currentPlayer, P
         int dx = m.x - 5;
         int dy = m.y - 5;
         score -= (dx * dx + dy * dy);
+        // Prioritize blocking high-severity opponent threats.
+        int key = m.y * 12 + m.x;
+        auto defIt = defensiveLookup.find(key);
+        if (defIt != defensiveLookup.end()) {
+            score += defIt->second;
+        }
         // Killer move heuristic: if this move is one of the recorded killer moves
         // at the current search ply, add a large bonus.  The first killer move
         // receives a larger bonus than the second.  Killer moves are ones that
