@@ -40,9 +40,17 @@ private:
     bool timeUp() const;
 
     // Evaluation of the board from the perspective of myColor.
+    struct EvalResult {
+        int patternScore;
+        int longestRun;
+        int longestOpenEnds;
+        bool hasOpenFourDouble;
+    };
+
     int evaluate(const Board &board, Player myColor) const;
-    int evaluatePlayer(const Board &board, Player player) const;
+    EvalResult evaluatePlayer(const Board &board, Player player) const;
     int patternScore(int count, bool leftOpen, bool rightOpen) const;
+    bool isWinningMove(const Board &board, Player player, int x, int y) const;
 
     // Alpha–beta search.
     int alphaBeta(Board &board, int depth, int alpha, int beta,
