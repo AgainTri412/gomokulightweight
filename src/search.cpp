@@ -84,7 +84,7 @@ int SearchEngine::patternScore(int count, bool leftOpen, bool rightOpen) const {
 // columns and both diagonals for contiguous runs of stones.  Only
 // straight runs are considered; broken patterns (e.g., "xx.x") are
 // not recognized explicitly but may still be partially credited.
-int SearchEngine::evaluatePlayer(const Board &board, Player player) const {
+SearchEngine::EvalResult SearchEngine::evaluatePlayer(const Board &board, Player player) const {
     // Convert the board bitboards into a 2D integer array for easier
     // scanning.  We use the values 1 for the target player's stones,
     // -1 for the opponent's stones and 0 for empty.  This representation
@@ -105,6 +105,8 @@ int SearchEngine::evaluatePlayer(const Board &board, Player player) const {
         }
     }
     int score = 0;
+    int longestRun = 0;
+    int longestOpen = 0;
     // --- Rows ---
     // Scan each row.  When we encounter a run of 1s, we measure its length
     // and check whether the ends are open (i.e. adjacent cells are empty).
@@ -120,6 +122,11 @@ int SearchEngine::evaluatePlayer(const Board &board, Player player) const {
                 bool leftOpen = (x1 - 1 >= 0 && grid[y][x1 - 1] == 0);
                 bool rightOpen = (x < 12 && grid[y][x] == 0);
                 score += patternScore(count, leftOpen, rightOpen);
+                int openEnds = (leftOpen ? 1 : 0) + (rightOpen ? 1 : 0);
+                if (count > longestRun || (count == longestRun && openEnds > longestOpen)) {
+                    longestRun = count;
+                    longestOpen = openEnds;
+                }
             } else {
                 ++x;
             }
@@ -173,6 +180,11 @@ int SearchEngine::evaluatePlayer(const Board &board, Player player) const {
                     if (grid[yr][xr] == 0) rightOpen = true;
                 }
                 score += patternScore(count, leftOpen, rightOpen);
+                int openEnds = (leftOpen ? 1 : 0) + (rightOpen ? 1 : 0);
+                if (count > longestRun || (count == longestRun && openEnds > longestOpen)) {
+                    longestRun = count;
+                    longestOpen = openEnds;
+                }
                 i = j;
             } else {
                 ++i;
@@ -211,13 +223,22 @@ int SearchEngine::evaluatePlayer(const Board &board, Player player) const {
                     if (grid[yr][xr] == 0) rightOpen = true;
                 }
                 score += patternScore(count, leftOpen, rightOpen);
+                int openEnds = (leftOpen ? 1 : 0) + (rightOpen ? 1 : 0);
+                if (count > longestRun || (count == longestRun && openEnds > longestOpen)) {
+                    longestRun = count;
+                    longestOpen = openEnds;
+                }
                 i = j;
             } else {
                 ++i;
             }
         }
     }
-    return score;
+    EvalResult result;
+    result.patternScore = score;
+    result.longestRun = longestRun;
+    result.longestOpenEnds = longestOpen;
+    return result;
 }
 
 int SearchEngine::evaluate(const Board &board, Player myColor) const {
@@ -225,9 +246,23 @@ int SearchEngine::evaluate(const Board &board, Player myColor) const {
     // pattern score and the opponent's pattern score.  A positive value
     // indicates that myColor has more or stronger threats on the board.
     Player opponent = (myColor == Player::Black ? Player::White : Player::Black);
-    int myScore = evaluatePlayer(board, myColor);
-    int oppScore = evaluatePlayer(board, opponent);
-    return myScore - oppScore;
+    auto myEval = evaluatePlayer(board, myColor);
+    auto oppEval = evaluatePlayer(board, opponent);
+
+    // Encourage goal-oriented play: heavily reward longer contiguous lines and
+    // open-ended runs, which directly correlate with the ability to win or
+    // force the opponent to respond.  The cubic scaling for longestRun makes
+    // four-in-a-row far more valuable than scattered stones, nudging the
+    // engine toward extending its best chains or cutting the opponent's best.
+    auto longestBias = [](const EvalResult &r) {
+        int runScore = r.longestRun * r.longestRun * r.longestRun * 500;
+        int opennessBonus = r.longestOpenEnds * 20000;
+        return runScore + opennessBonus;
+    };
+
+    int positionalScore = myEval.patternScore - oppEval.patternScore;
+    int shapeScore = longestBias(myEval) - longestBias(oppEval);
+    return positionalScore + shapeScore;
 }
 
 int SearchEngine::alphaBeta(Board &board, int depth, int alpha, int beta,
@@ -402,6 +437,17 @@ Move SearchEngine::findBestMove(Board &board, Player myColor, int timeLimitMs) {
     if (getOpeningMove(board, myColor, bookMove)) {
         return bookMove;
     }
+
+    // Urgent defensive move: if the opponent has an immediate tactical threat
+    // (e.g., open four or a highly flexible three), answer it before starting
+    // the full search to avoid time-consuming but obvious defenses.
+    auto defensiveMoves = threatSolver.findBlockingMoves(board, myColor);
+    if (!defensiveMoves.empty()) {
+        const int CRITICAL_SEVERITY = 500000; // open fours and simple fours.
+        if (defensiveMoves.front().severity >= CRITICAL_SEVERITY) {
+            return defensiveMoves.front().move;
+        }
+    }
     Move bestMove(-1, -1);
     // Generate and order root moves.  These moves will be re‑ordered
     // between iterations based on the values returned by the search.
@@ -475,6 +521,18 @@ std::vector<Move> SearchEngine::orderMoves(Board &board, Player currentPlayer, P
     std::vector<std::pair<int, Move>> scored;
     scored.reserve(moves.size());
     Player opponent = (currentPlayer == Player::Black ? Player::White : Player::Black);
+
+    // Surface urgent defensive moves against the opponent's most dangerous
+    // threats (e.g., open fours or open/broken threes) so they are explored
+    // early.
+    auto defensiveMoves = threatSolver.findBlockingMoves(board, currentPlayer);
+    std::unordered_map<int, int> defensiveLookup;
+    for (const auto &t : defensiveMoves) {
+        int key = t.move.y * 12 + t.move.x;
+        if (defensiveLookup.find(key) == defensiveLookup.end() || defensiveLookup[key] < t.severity) {
+            defensiveLookup[key] = t.severity;
+        }
+    }
     for (const auto &m : moves) {
         int score = 0;
         // Make the move and evaluate consequences.
@@ -502,6 +560,12 @@ std::vector<Move> SearchEngine::orderMoves(Board &board, Player currentPlayer, P
         int dx = m.x - 5;
         int dy = m.y - 5;
         score -= (dx * dx + dy * dy);
+        // Prioritize blocking high-severity opponent threats.
+        int key = m.y * 12 + m.x;
+        auto defIt = defensiveLookup.find(key);
+        if (defIt != defensiveLookup.end()) {
+            score += defIt->second;
+        }
         // Killer move heuristic: if this move is one of the recorded killer moves
         // at the current search ply, add a large bonus.  The first killer move
         // receives a larger bonus than the second.  Killer moves are ones that

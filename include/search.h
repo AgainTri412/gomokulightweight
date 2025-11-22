@@ -5,6 +5,7 @@
 #define GOMOKU_SEARCH_H
 
 #include "board.h"
+#include "threat_solver.h"
 
 #include <chrono>
 #include <vector>
@@ -39,8 +40,14 @@ private:
     bool timeUp() const;
 
     // Evaluation of the board from the perspective of myColor.
+    struct EvalResult {
+        int patternScore;
+        int longestRun;
+        int longestOpenEnds;
+    };
+
     int evaluate(const Board &board, Player myColor) const;
-    int evaluatePlayer(const Board &board, Player player) const;
+    EvalResult evaluatePlayer(const Board &board, Player player) const;
     int patternScore(int count, bool leftOpen, bool rightOpen) const;
 
     // Alpha–beta search.
@@ -56,6 +63,10 @@ private:
     std::chrono::steady_clock::time_point timeEnd;
     // Maximum search depth reached during current search (for reporting).
     int maxDepthReached;
+
+    // Tactical threat detector used to surface urgent defensive moves, such as
+    // blocking open threes or fours from the opponent.
+    ThreatSolver threatSolver;
 
     // --- Transposition table ---
     // Each entry stores the best known score for a position at a given depth,
